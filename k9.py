@@ -5,13 +5,17 @@ K9 is a roving robot that can respond to voice commands.
 Makes heavy use of google aiy voice library
 Hardware:
     Raspberry Pi Zero
-    Google AIY Voice Bonnet
-    Adafruit Motor bonnet connected to an old robot vacuum chassis
+    Google AIY Voice Bonnet: https://aiyprojects.withgoogle.com/voice/#makers-guide--gpio-header-pinout
+    Adafruit Motor bonnet
+    Sharp GP2Y0D810Z0F Digital Distance Sensor (2-10 cm) https://www.adafruit.com/product/1927
+    robot vacuum chassis
 Major libraries:
-    aiy,board
+    aiy.board
     aiy.voice
     wikipedia
-    pygame (this is for playing the "blip" sound)
+    gpiozero (this will be useful for reading sensors)
+    https://gpiozero.readthedocs.io/en/stable/api_input.html
+
 """
 import argparse
 import locale
@@ -19,21 +23,28 @@ import logging
 from datetime import datetime
 
 from aiy.board import Board, Led
-from aiy.pins import PIN_A, PIN_B
+from aiy.pins import PIN_A, PIN_B, PIN_C, PIN_D, LED_1, LED_2 # pins and leds on the voice board
 from aiy.cloudspeech import CloudSpeechClient   # does the speech-recognition magic
 import aiy.voice.tts    # does the text-to-speech
 import wikipedia        # you can guess. this module actually doesn't work very well.
 import requests
+import gpiozero # this library handles sensors and leds and stuff
+from gpiozero import Button, MotionSensor, LED # obstacle detector
+front_sensor = MotionSensor(pin=PIN_A, pull_up=True)    # the sensor fires low when triggered
+left_sensor = MotionSensor(pin=PIN_B, pull_up=True)    # the sensor fires low when triggered
+right_sensor = MotionSensor(pin=PIN_C, pull_up=True)    # the sensor fires low when triggered
 import json
 import time
 from adafruit_motorkit import MotorKit  # this runs the motor interface
 kit = MotorKit()    # feels weird to init this here, but can't figure out where else to do it
+left_motor = kit.motor2
+right_motor = kit.motor1
+LEFT_FORWARD = -1
+LEFT_BACKWARD = 1
+RIGHT_FORWARD = 1
+RIGHT_BACKWARD = -1
 motor_speed = 0.4   # this is default speed for motors. 1.0 is max. 
-FORWARD = -1    
-BACKWARD = 1
-motor_direction = FORWARD
-from pygame import mixer    #this is the soundfile player
-from pickle import NONE     #not sure why this is here; do we even use it?
+
 """
 Now declare some global variables. I don't like doing this here but where else?
 """
@@ -42,10 +53,9 @@ user_name_tries = 0     # keep track of how many times we've tred to set name
 awake_flag = 0          # user has to wake us up by uttering hotword
 awake_time = 0          # remember when we woke up
 bed_time = 5            # this is how long K9 stays awake 
-k9_volume = 20      # sets initial volume. user can tell k9 to get louder/quieter
+k9_volume = 5      # sets initial volume. user can tell k9 to get louder/quieter
 wiki_sentences = 5 # sets how many sentences to read from wikipedia.
 k9_board = Board()  # again, i hate that we have to do this here instead of in an init func
-mixer.init()    #set up the soundfile player
 """
 This func makes K9 say something using the AIY tts module. Here's where we set pitch, accent etc
 """
@@ -104,7 +114,6 @@ def speed_up(text=""):
     if (motor_speed > 1) :
         motor_speed = 1
         say("Thats my top speed.")
-    return
 def slow_down(text=""):
     global motor_speed 
     motor_speed = motor_speed - 0.2
@@ -119,20 +128,20 @@ implement a state machine or something. but for now we'll just do this for arbit
 """
 def turn_right(text=""):
     start_time = time.time()
-    kit.motor1.throttle = -0.5
-    kit.motor2.throttle = 0.5
-    say("turning right")
-    while time.time() - start_time < 0.25:  # this executes roughly a quarter turn.
+    left_motor.throttle = LEFT_FORWARD * motor_speed
+    right_motor.throttle = RIGHT_BACKWARD * motor_speed
+    say("right")
+    while time.time() - start_time < 0.2:  # this executes roughly a quarter turn.
         pass
-    kit.motor1.throttle = None
-    kit.motor2.throttle = None
+    left_motor.throttle = None
+    right_motor.throttle = None
     return
 def turn_left(text=""):
     start_time = time.time()
-    kit.motor1.throttle = 0.5
-    kit.motor2.throttle = -0.5
-    say("turning left")
-    while time.time() - start_time < 0.25:  # this executes roughly a quarter turn.
+    left_motor.throttle = LEFT_BACKWARD * motor_speed
+    right_motor.throttle = RIGHT_FORWARD * motor_speed
+    say("left")
+    while time.time() - start_time < 0.2:  # this executes roughly a quarter turn.
         pass
     kit.motor1.throttle = None
     kit.motor2.throttle = None
@@ -141,23 +150,12 @@ def attack(text=""):
     say("attack!")
     go_forward("go forward 5")
     return
+"""
+Now a func where we actually want to read the text object, because it may contain useful info,
+such "go forward 7" where the number indicates duration of motion in seconds. 
+Of course if they just say "go forward" then we use a default value for the duration. 
+"""
 def go_forward(text=""):
-    global motor_direction
-    motor_direction = FORWARD
-    engage_motor(text)
-    return
-def go_back(text=""):
-    global motor_direction
-    motor_direction = BACKWARD
-    engage_motor(text)
-    return
-"""
-engage_motor() is where we actually make the damn thing go back or forward. Note this is one of
-the cases where we actually want to read the text object, because it may contain useful info,
-such "go forward 7" or "go back 3". Of course if they just say "go forward" then we use a default
-value for the duration. There must be prettier ways to do all this but oh well.
-"""
-def engage_motor(text=""):
     word_list = text.split()
     try :
         third_word = word_list[2] #get the third word
@@ -168,35 +166,107 @@ def engage_motor(text=""):
     except :
         throttle_duration = 3.0 # if int() didn't work, set for 3 seconds
     if throttle_duration > 10 :
-        throttle_duration = 10  # let's set a default max so user can't ask for 1 million seconds 
+        throttle_duration = 10  # let's set a default max so user can't ask for 1 million seconds     global motor1_direction
+    return engage_motor(leftspeed=LEFT_FORWARD * motor_speed,rightspeed=RIGHT_FORWARD * motor_speed,duration=throttle_duration)
+def go_back(text=""):
+    return engage_motor(leftspeed=LEFT_BACKWARD * motor_speed,rightspeed=RIGHT_BACKWARD * motor_speed,duration=1)
+def obstacle_detected():
+    logging.info("foo")
+    return
+"""
+engage_motor() is where we actually make the damn thing go back or forward. 
+If we detect an obstacle, stop moving and return 0.
+There must be prettier ways to do all this but oh well.
+"""
+def engage_motor(leftspeed=1,rightspeed=1,duration=1):
+    global front_sensor
+    global left_sensor
+    global right_sensor
+
+    if duration > 10 :
+        duration = 10  # let's set a default max so user can't ask for 1 million seconds 
     start_time = time.time()
-    kit.motor1.throttle = motor_direction*motor_speed
-    kit.motor2.throttle = motor_direction*motor_speed        
-    while time.time() - start_time < throttle_duration:
-        pass    # in theory this is where we could look at sensors to avoid obstacles.
-    kit.motor1.throttle = None
-    kit.motor2.throttle = None
+    left_motor.throttle = leftspeed
+    right_motor.throttle = rightspeed        
+    while time.time() - start_time < duration:
+        if front_sensor.motion_detected == True :  # the sensor detects an obstacle
+            left_motor.throttle = None
+            right_motor.throttle = None
+            logging.info("obstacle in front")
+            return 0
+        elif left_sensor.motion_detected == True :  # the sensor detects an obstacle
+            left_motor.throttle = None
+            right_motor.throttle = None
+            logging.info("obstacle left")
+            return 0
+        elif right_sensor.motion_detected == True :  # the sensor detects an obstacle
+            left_motor.throttle = None
+            right_motor.throttle = None
+            logging.info("obstacle right")
+            return 0
+        else :
+            pass    # no obstacle, keep looping til we exceed duration.
+    left_motor.throttle = None
+    right_motor.throttle = None
+    return 1
+"""
+The explore func would lets K9 roam around the room, avoiding obstacles. The basic
+idea is to go forward til we sense something, then turn, try again, etc. ideally during the cycle
+we would also check to see if user has said something. command would be "explore 30" or sometnng like that.
+for now the max time for explore is 100 seconds
+"""
+def explore(text=""):
+    word_list = text.split()
+    try :
+        second_word = word_list[2] #get the second word
+    except :
+        second_word = "30"    # there wasn't one. so set to 30 seconds
+    try :
+        explore_duration = int(second_word)
+    except :
+        explore_duration = 30 # if int() didn't work, set for 3 seconds
+    if explore_duration > 100 :
+        explore_duration = 100  # let's set a max so user can't ask for 1 million seconds 
+    start_time = time.time()
+    left_count = 0
+    while time.time() - start_time < explore_duration: # do this for duration seconds tops
+        sailing = go_forward("go forward 2") #
+        if sailing == 1 :   # no obstacle
+            left_count = 0
+            continue
+        else :   # obstacle!
+            left_count = left_count + 1
+            if left_count > 5 :
+                go_back()
+            turn_left()
+            continue
     return
 """
 don't think we actually need this func any more
 """
 def halt(text=""):    
-    global motor_direction
-    global motor_speed
-    kit.motor1.throttle = None
-    kit.motor2.throttle = None
-    motor_direction = FORWARD
+    left_motor.throttle = None
+    right_motor.throttle = None
     motor_speed = 0.3
     return
-def spin(text=""):  # spin around clockwise for 4 seconds.
+def spin(text=""):  # spin clockwise, then anticlockwise
     start_time = time.time()
-    kit.motor1.throttle = 0.75
-    kit.motor2.throttle = -0.75
+    left_motor.throttle = LEFT_FORWARD
+    right_motor.throttle = RIGHT_BACKWARD
     say("and around we go")
-    while time.time() - start_time < 4:
+    while time.time() - start_time < 2.5:
         pass
-    kit.motor1.throttle = None
-    kit.motor2.throttle = None
+    left_motor.throttle = None
+    right_motor.throttle = None
+    while time.time() - start_time < 0.2:
+        pass
+    left_motor.throttle = LEFT_BACKWARD
+    right_motor.throttle = RIGHT_FORWARD
+    say("You make me dizzy, miss lizzy!")
+    while time.time() - start_time < 2.5:
+        pass
+    left_motor.throttle = None
+    right_motor.throttle = None
     return
 """ Next some funcs that just say stuff"""
 def repeat_me(text=""):
@@ -224,9 +294,12 @@ def say_weather(text=""):
         + "&units=imperial"
         )
     say("Let me check.") 
-
-    response = requests.get(full_url) 
-    data = json.loads(response.text)
+    try:
+        response = requests.get(full_url)
+        data = json.loads(response.text)
+    except:
+        say("Sorry, I'm not sure. Try looking out the window.") 
+        return
     current = data["current"]
     current_temp = current["temp"]
     current_weather = current["weather"]
@@ -240,20 +313,34 @@ def say_weather(text=""):
     say('Forecast calls for a high of "%d", and a low of "%d".' % (max_temp, min_temp))
     return 
 def tell_joke(text=""):
-    url = r"https://official-joke-api.appspot.com/random_joke"
-    data = requests.get(url)
-    joke = json.loads(data.text)
-    say(joke["setup"]+"...")
+    url = "https://official-joke-api.appspot.com/random_joke"
+    try:
+        data = requests.get(url)
+        joke = json.loads(data.text)
+    except:
+        say("Sorry, I can't think of one right now.")
+        return
+    say(joke["setup"]+"..")
     say(joke["punchline"])
     return
+def trivia(text=""):
+    url = "https://opentdb.com/api.php?amount=1&category=23&difficulty=medium&type=multiple"
+    try:
+        data = requests.get(url)
+        trivia = json.loads(data.text)
+    except:
+        say("argh.")
+        return
+    logging.info(trivia.json())
+    return
 def say_fav_show(text=""):
-    say("Doctor Who. Obviously!")
+    say("Doctor Who, obviously!")
     return 
 def say_creator(text=""):
     say("Some maniac from Reed College. Between you and me, I think he's got a screw loose.")
     return 
 def say_name(text=""):
-    say("My name is K9 Mark 3. I'm an experimental project created by Chris Lidgaate.")
+    say("My name is K9 Mark 3. I'm an experimental robot created by Chris Lidgaate. I can respond to simple commands. I can also tell jokes.")
     return 
 def say_goodbye(text=""):
     global user_name
@@ -273,27 +360,30 @@ and wish we could do better error-checking. there's long latency while we get in
 """
 def tell_me_about(text):
     if not text:
-        return
+        return -1
     # so text will be something like "tell me about Delaware."
     # first we have to strip out the 'tell me about' preamble
     topic = text.replace('tell me about', '', 1)
     if not topic:
         say("Sorry, I didn't catch that.")
-        return
+        return -1
     say("OK, Hang on a sec while I look up" + topic)
     try:
-            wikipedia_entry = wikipedia.summary(topic, sentences=wiki_sentences)
+        wikipedia_entry = wikipedia.summary(topic, sentences=wiki_sentences)
     except wikipedia.exceptions.PageError as e:
-            logging.info(e.options)
-            say("Page error.")
-            return
+        logging.info(e.options)
+        say("Page error.")
+        return -1
     except wikipedia.exceptions.DisambiguationError as e:
-            logging.info(e.options)
-            say("Sorry, that was too ambiguous.")
-            return
+        logging.info(e.options)
+        say("Sorry, that was too ambiguous.")
+        return -1
+    except :
+        say("Sorry, something went wrong.")
+        return -1
     say("Here's what I found:")
     say(wikipedia_entry)
-    return 
+    return 1
 def more_detail(text=""):
     global wiki_sentences
     wiki_sentences = wiki_sentences + 2
@@ -323,8 +413,12 @@ def answer_question(question=""):
     if first_word not in qlist :
         logging.info('"%s" is not a question.' % question)
         return 0
-    shitlist = [ 'you','your','me','my','us','we']
-    say("I have no idea.")
+    shitlist = ['you','your','me','my','us','we']
+    s = set(question.split()).intersection(shitlist)
+    if len(s) != 0 :
+        say("That is a personal question.")
+        return 0
+    say("I have no idea. But I know someone who might know.")
     k9_volume = k9_volume + 20  # make it loud!
     say("Alexa! " + question)  
     k9_volume = k9_volume - 20  # back to normal volume
@@ -359,32 +453,7 @@ def set_user_name(text):
         if "chris" in user_name:
             say("I thought it might be you, " + user_name + ". What an unexpected pleasure.")
             return user_name       
-        elif "alex" in user_name:
-            say("I hear you can walk on stilts, " + user_name + ". I would do that but I don't have legs.")
-            return user_name       
-        elif "theo" in user_name:
-            say("I hear you like the beetles, " + user_name + ". My favorite beetle is Paul.")
-            return user_name       
-        elif "luke" in user_name:
-            say("I hear you're good at soccer, " + user_name + ". Maybe one day you'll teach me how to play!")
-            return user_name       
-        elif "audrey" in user_name:
-            say(user_name)
-            say("The famous shef? I'm honored. I wish I could join you for dinner, but I don't eat much.")
-            return user_name       
-        elif "mike" in user_name:
-            say("Hey there")
-            say(user_name)
-            say("How are the trains running?")
-            return user_name       
-        elif "betty" in user_name:
-            say("Hello")
-            say(user_name)
-            say("You have a wonderful family.")
-            return user_name       
-        elif "lucy" in user_name:
-            say("Hello, " + user_name + ". You are very very fluffy.")
-            return user_name       
+  
         else :
             say("Greetings, " + user_name + ". It's a pleasure to meet you.")
             return user_name
@@ -413,6 +482,7 @@ phrase_bank = {
     'stop'   : halt, 
     'halt'   : halt, 
     'woe'   : halt, 
+    'explore'   : explore,
     'get louder'   : get_louder, 
     'speak up'   : get_louder, 
     'pipe down'   : get_quieter, 
@@ -429,6 +499,7 @@ phrase_bank = {
     'what\'s your favorite show'    : say_fav_show,
     'what\'s your name'     : say_name, 
     'who are you'     : say_name, 
+    'identify yourself'     : say_name, 
     'who built you'     : say_creator, 
     'who made you'     : say_creator, 
     'who created you'   : say_creator, 
@@ -489,10 +560,6 @@ Finally, define the main() loop
 """
 def main():
     global awake_flag
-    mixer.music.load("sine-wave-0.05s.wav") # this soundfile plays short blip
-    mixer.music.set_volume(0.2) # make it very quiet
-    mixer.music.play()
-
     logging.basicConfig(level=logging.DEBUG)
 
     parser = argparse.ArgumentParser(description='Assistant service example.')
@@ -505,15 +572,17 @@ def main():
     say_time()
     say("Greetings. This is K-9 Mark Three.")
     say("Please wait until my light starts to blink before you tell me anything.")
-    say("What is your name? Wait for the light.")
+    say("Identify yourself. What is your name? Wait for the blinky light.")
     text = client.recognize(language_code=args.language,
                                 hint_phrases=0)
     set_user_name(text)
-    say("Awaiting your instructions. Wait for the light.")
+    say("Awaiting your instructions. Wait for the blinky light.")
     # now comes the guts of the program. We loop, listening for user to say something
     # that we send to the AIY speech recognition software in the cloud. It magically returns a 
     # text object. that we can inspect. Bizarre, but it works!  
     while True:
+        if front_sensor.motion_detected == True :
+            logging.info("obstacle")
         text = client.recognize(language_code=args.language,    # this invokes the speech client.
                                 hint_phrases=hints)
         if text is None:
